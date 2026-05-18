@@ -1,0 +1,51 @@
+{
+  "skill_name": "whale-analysis",
+  "playbook_version": "2026-05-08",
+  "playbook_commit_sha": "workspace",
+  "adapter_name": "shared-whale-analysis-playbook",
+  "adapter_version": "5",
+  "execution_mode": "read-only",
+  "default_analysis_mode": "quick-triage",
+  "first_pass_target": "90s",
+  "supported_cli_range": ">=0.1.0",
+  "supported_contract_range": "2026-04",
+  "transcript_schema_version": "1",
+  "canonical_derivation": "ops-api-gateway/internal/resourcekernel -> /cli/v1/debug/schema|/cli/v1/debug/explain -> whale -> whale-analysis",
+  "compatibility_deprecation_host": "gateway-derived registry",
+  "sls_count_policy": "SLS count intent must use a bounded query with '| select count(1) as cnt'; never infer real counts from --limit or normal search response total",
+  "sls_pagination_policy": "SLS normal-log retrieval uses --page with --limit<=100; count first, then iterate pages. Backend can auto-segment bounded normal-log and single-row count(1) queries up to 24h, so clients must not emulate time slicing.",
+  "quick_triage_policy": {
+    "normal_command_budget": 4,
+    "hard_command_budget": 5,
+    "must_include": [
+      "conclusion_grade",
+      "confidence",
+      "evidence",
+      "not_confirmed",
+      "next_best_action"
+    ],
+    "forbidden_by_default": [
+      "application_log",
+      "sls",
+      "trace",
+      "topology",
+      "appinstance_template",
+      "appinstance_runtime",
+      "release_approval"
+    ]
+  },
+  "metric_evidence_policy": {
+    "application_health_quick": [
+      "error-logs",
+      "latency"
+    ],
+    "alert_quick": "exactly one targeted metric selected from alert content",
+    "targeted_when_resource_or_jvm_symptom": [
+      "cpu",
+      "heap",
+      "minor-gc-count",
+      "major-gc-count"
+    ],
+    "confirmation_rule": "confirmed root cause requires at least two evidence classes; otherwise report suspected"
+  }
+}
