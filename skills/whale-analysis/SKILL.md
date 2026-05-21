@@ -1,11 +1,11 @@
 ---
 name: whale-analysis
 description: >
-  Analyze Whale alerts, applications, app instances, releases, logs, traces,
-  tasks, and cost with read-only Whale semantic commands. Use for SRE triage,
-  current-alert review, app health checks, release impact analysis, and
-  evidence-backed operational diagnosis.
-version: 1.0.0
+  Analyze Whale applications, alerts, releases, tasks, logs, metrics,
+  topology, traces, and cost using read-mostly Whale semantic commands. Use
+  for SRE first-pass triage, current alerts, application health, release/task
+  context, bounded log analysis, and evidence-backed operational diagnosis.
+version: 2.0.0
 platforms: [macos, linux]
 metadata:
   hermes:
@@ -16,136 +16,183 @@ metadata:
 
 # Whale Analysis
 
-Use this skill when the user wants read-only operational analysis against the
-Whale CLI, including alert triage, application health checks, release impact
-review, bounded log checks, and instance-level deepening.
+Use this skill when the user asks for Whale operational analysis such as
+application health, current alerts, specific alerts, release impact, task
+context, log evidence, trace or topology context, or cost context.
 
-## Before You Start
+## Role
 
-- Verify the `whale` CLI is installed and already authenticated.
-- Keep the workflow read-only.
-- Use only these Whale semantic commands: `list`, `show`, `search`, `status`,
-  `debug`.
-- Prefer exact IDs when the user gives one.
-- Separate collected evidence from your own inference.
+This skill is a scenario adapter, not a second resource kernel.
 
-If `whale` is missing or unauthenticated, stop and tell the user what is
-blocked instead of inventing data.
+- Gateway or resource kernel owns resource semantics, evidence bundles,
+  permissions, pagination, query rules, and compatibility.
+- `whale` CLI owns command grammar, auth and config, installation, version,
+  help, and rendering such as `--format summary`.
+- This skill owns natural-language routing, first-pass evidence selection,
+  stop or deepen decisions, and concise conclusions.
 
-## Core Workflow
+When a deterministic rule is missing, prefer a gateway or CLI evidence-bundle
+improvement over long prompt-only fallback behavior.
 
-1. Classify the request as one of:
-   - current alerts
-   - recent alerts
-   - specific alert
-   - application health
-   - deepen on demand
-   - release or task analysis
-2. Start with quick triage unless the user explicitly asks for deeper evidence.
-3. Stay within the quick-triage command budget:
-   - normal budget: 4 commands
-   - hard budget: 5 commands
-4. Use the canonical command patterns from
-   [references/whale-analysis-playbook.md](./references/whale-analysis-playbook.md).
-5. If quick triage is inconclusive, stop and recommend the single best next
-   read-only command instead of silently continuing.
+## Allowed Surface
 
-## Quick-Triage Rules
+Use only Whale semantic commands:
 
-- Treat `当前告警` as `list alert --status alarm --page-size 10`.
-- Treat stale, ignored, recovered, or app-less alerts as non-active unless
-  fresh evidence says otherwise.
-- For alert triage, use exactly one targeted metric chosen from alert content.
-- For application health, use `status application` plus `error-logs` and
-  `latency`.
-- Do not pull logs, SLS, topology, trace, appinstance runtime/template, or
-  release approvals during quick triage unless the user explicitly asks for
-  depth.
-- Do not present a root cause as confirmed unless at least two evidence classes
-  support it.
+- `list`
+- `show`
+- `search`
+- `count`
+- `status`
+- `snapshot`
+- `correlate`
+- `debug`
 
-## Canonical Scenarios
+Default to read-mostly analysis. Do not perform approvals, retries, scaling,
+stop, rollback, release application, ticket creation, or raw K8S or CMDB
+writes.
 
-### Current Alerts
+The only controlled write surface in this phase is `whale workload restart`.
+Use it only when the user explicitly asks for restart. First run it without
+`--yes` to obtain policy and audit context. Execute with `--yes` only if the
+policy returns `direct_allowed` and the user explicitly confirms execution.
 
-1. `list alert --status alarm --page-size 10`
-2. Summarize up to 10 alerts.
-3. Quick-triage only the newest actionable alert with app and env context.
+## First Update Model
 
-### Recent Alerts
+Default to a useful first update, then deepen only when needed.
 
-1. `list alert --page-size 10`
-2. Summarize up to 10 alerts.
-3. Quick-triage only the newest alert with app and env context.
+First-pass target:
 
-### Specific Alert
+- usually within 60 seconds
+- answer current judgment, confidence, handling suggestion, material evidence,
+  and material gaps
+- do not try to prove root cause in the first response unless evidence already
+  supports it
 
-1. `show alert <id>`
-2. `show alert <id> --view timeline`
-3. `status application --name <app-name> --env <env>`
-4. `search application --view metric --name <app-name> --env <env> --type <targeted-metric>`
+Prefer gateway or CLI evidence bundles:
 
-### Application Health
+- application health:
+  `whale snapshot application --name <app> --env <env> --profile triage --format summary`
+- alert: `whale snapshot alert <id> --format summary`
+- current alerts: `whale snapshot alert current --format summary`
+- release: `whale snapshot release <id> --format summary`
+- task: `whale snapshot task <id> --format summary`
+- time-window relationship:
+  `whale correlate application --name <app> --env <env> --window <duration> --format summary`
 
-1. `status application --name <app-name> --env <env>`
-2. `search application --view metric --name <app-name> --env <env> --type error-logs`
-3. `search application --view metric --name <app-name> --env <env> --type latency`
+For simple status lookup, run only
+`whale status application --name <app> --env <env>` first. If no environment is
+provided, use `production-b2b-cn` and say so briefly.
 
-## Deepen On Demand
+For `当前告警`, phase 1 is triage direction, not full inventory or root-cause
+proof.
 
-Only deepen when the user explicitly asks, or when one extra evidence class can
-materially change the recommendation.
+Allowed first-pass command:
 
-Use these bounded paths:
+- `whale snapshot alert current --format summary`
 
-- Instance scope: `list appinstance --of application=<app-name>` then
-  `status appinstance <id>` then `list pod --of appinstance=<id>`
-- Logs: `search log --of application=<app-name> --env <env> --contains <text> --start <ts> --end <ts>`
-- Trace: `search trace --name <app-name> --page 1 --page-size 20`
-- Topology: `show application --view topology --name <app-name>`
-- Release: `list release --keyword <app-name> --page-size 5`, then
-  `list job --of release=<id>`, then `search log --of release=<id> --keyword failed`
+Representative alert priority from the first page: active application or
+workload availability alerts first, then resource saturation or capacity
+alerts, then other infrastructure alerts; break ties by severity and recency.
 
-For SLS totals, follow the exact count rule in
-[references/whale-analysis-playbook.md](./references/whale-analysis-playbook.md):
-use `| select count(1) as cnt` first, then page normal logs with `--page` and
-`--limit 100`.
+Do not expand pagination, run multiple alert snapshots, run `correlate`,
+inspect logs, inspect pod or appinstance, or inspect release impact before the
+first answer.
 
-## Resource-Specific Constraints
+## Deepen Triggers
 
-- `search log --of pod=...` is not enabled.
-- `status appinstance <id>` is the canonical instance health summary.
-- If `show --name` returns `409`, ask one clarification question with
-  candidates.
-- If metrics fail or return no usable series, record an evidence gap. Do not
-  treat that as proof of normality.
-- Conditional capabilities such as `show approval --of release=<id>` or
-  `search log --view sls ...` must not block the rest of the analysis.
+Automatically deepen only when:
+
+- bundle `quality` is insufficient
+- an anomaly is clear and the allowed first-pass evidence lacks enough
+  owner, resource, time, or severity context to give a useful handling
+  suggestion
+- evidence classes conflict
+- the user explicitly asks to continue, confirm root cause, check logs, check
+  trace, check instances, or inspect release impact
+
+Do not fetch appinstance, pod, logs, SLS, VictoriaLogs, trace, topology,
+approval, runtime/template, or broad debug output in the first pass unless the
+user asks for that evidence.
+
+For `当前告警`, do not treat "there is an obvious next read" as a deepen trigger
+by itself; put it in `下一步` unless the user asks to continue.
 
 ## Output Contract
 
-Quick triage should end with:
+Default first-pass output:
 
 ```text
-结论等级: active | recovered | stale_or_ignored | healthy | inconclusive
-置信度: high | medium | low
+结论: <healthy | active | recovered | stale_or_ignored | suspected | inconclusive>
+置信度: <high | medium | low>
+处理建议: <one actionable recommendation>
 证据:
-- ...
-不能确认:
-- ...
+- <material evidence>
+未确认:
+- <only material gaps>
 下一步:
-- ...
+- <one best read-only next step>
 ```
 
-Always label evidence separately from inference. Use words like `suspected`,
-`likely`, or `needs confirmation` when evidence is incomplete.
+For status-only requests, answer shorter: one conclusion line, up to 4 evidence
+bullets, and one optional next action.
+
+## Required Routing Rules
+
+- Treat `当前告警` as `whale snapshot alert current --format summary`.
+- For `当前告警`, do not expand later pages before the first answer.
+- For `当前告警`, use the snapshot-bundled representative alert before
+  considering any second alert read.
+- For `当前告警`, pick the representative alert by impact class first, not only
+  by recency.
+- For `当前告警`, run `correlate` only after the first answer or when the user
+  explicitly asks for release or time-window correlation.
+- Do not present stale, ignored, recovered, or resource-less alerts as active
+  incidents.
+- App-less RDS, VPN, cluster, node, pod, deployment, or container alerts may
+  be active resource incidents; label them as resource or workload incidents
+  and state the missing application mapping.
+- Prefer exact `id` when provided.
+- If only a `name` is provided, follow canonical resource paths. For
+  `appinstance`, discover by `application` first, then switch to instance `id`.
+- If `show --name` returns `409`, ask one clarification question with
+  candidates.
+- Treat missing metric series as an evidence gap, not healthy evidence.
+- Treat QPS or traffic warning alone as observe-level when alerts, restarts,
+  errors, and latency are normal.
+- Use canonical pressure reads only after the first answer or when the user
+  asks for resource deepening:
+  - `whale snapshot cluster --name <cluster> --format summary`
+  - `whale snapshot cluster --zone <zone> --format summary`
+  - `whale snapshot node <id> --window <duration> --format summary`
+- When the user asks for instance-level proof, prefer the canonical pod
+  evidence chain:
+  - `whale list pod --of appinstance=<id>`
+  - `whale show pod <pod-id>`
+  - `whale list event --of pod=<pod-id>`
+  - `whale search/count log --of pod=<pod-id> ...`
+- Treat `search/count log --of pod=<pod-id>` as bounded historical Pod log
+  evidence over a time window, not live tail or websocket stream.
+- If the user explicitly asks for real-time Pod log tail, state that the
+  current Whale analysis surface does not expose live stream Pod logs in this
+  phase.
+- For SLS count intent, prefer `whale count log --view sls --query '<expr>'`.
+  The legacy `search ... '| select count(1) as cnt'` form remains compatible.
+- If the user wants SLS but does not know the console id or name yet, enumerate
+  accessible consoles first with
+  `whale list log-console --keyword <text> --page-size 100 --format summary`.
+- For VictoriaLogs totals, use
+  `whale count log --view vlogs --query '<LogsQL>'`.
+- When reading VictoriaLogs, prefer explicit `--start/--end`; if omitted,
+  Whale defaults to the latest 15m.
+- For heavier exact-token or `_msg` reads, `--timeout 60s` is available, but
+  narrowing with app, namespace, or pod filters still takes priority.
 
 ## References
 
 - Load
   [references/whale-analysis-playbook.md](./references/whale-analysis-playbook.md)
-  for the full command patterns, scenario playbooks, SLS policies, and deep
-  analysis paths.
+  for deeper scenario orchestration, exact command patterns, SLS and
+  VictoriaLogs details, and runtime caveats.
 - Load
   [references/whale-analysis-playbook.json](./references/whale-analysis-playbook.json)
-  when you need machine-readable version/support metadata.
+  for machine-readable version, policy, and compatibility metadata.
