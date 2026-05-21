@@ -1,202 +1,323 @@
-# whale Whale Analysis Playbook
+# Whale Analysis Playbook
 
 ## Purpose
 
-This document is the shared read-only playbook for Whale analysis skills.
-Hermes adapters should derive their workflow from this file and from the
-canonical gateway contract surfaced through `/cli/v1/debug/schema` and
-`/cli/v1/debug/explain`.
+This is the shared read-only playbook for the `whale-analysis` skill.
+Hermes adapters should derive from this file and from the canonical gateway
+contract surfaced through `/cli/v1/debug/schema`, `/cli/v1/debug/explain`,
+`/cli/v1/snapshot`, and `/cli/v1/correlate`.
 
 Metadata host:
+
 - [`whale-analysis-playbook.json`](./whale-analysis-playbook.json)
 
-## Rules
+## Ownership Boundary
 
-- Use `whale` semantic commands only: `list`, `show`, `search`, `status`, `debug`.
-- Keep the workflow read-only.
-- Default to `quick-triage`: produce a first-pass handling recommendation within 90 seconds.
-- Quick triage is not root-cause confirmation. It must use "suspected", "likely", or "needs confirmation" unless deep evidence confirms the cause.
-- Quick triage has a strict command budget: normally 4 commands, maximum 5 commands.
-- Quick triage output must include: conclusion grade, confidence, evidence, what is not confirmed, and the next best read-only action.
-- Do not run logs, SLS, trace, topology, appinstance template/runtime, release approval, or broad debug output in quick triage unless the user explicitly asks for that evidence.
-- Use exactly one targeted metric in alert quick triage. Do not fetch `traffic`, `latency`, and `error-logs` by default.
-- For application health quick triage, use status plus the two highest-signal metrics: `error-logs` and `latency`.
-- Treat metrics as corroborating evidence, not decoration. Without at least two evidence classes, report "suspected" rather than "confirmed".
-- Do not invent compatibility, deprecation, or alias semantics outside gateway debug output.
-- Organize reasoning by scenario, not by resource inventory.
+The skill is not a second resource kernel.
 
-## Execution Modes
+- Gateway or resource kernel owns resource semantics, API composition, evidence
+  bundles, permission behavior, pagination, query semantics, and compatibility.
+- `whale` CLI owns command grammar, auth and config, help and version, install
+  surfaces, and local rendering such as `--format summary`.
+- `whale-analysis` owns natural-language intent routing, first-pass evidence
+  choice, stop or deepen decisions, and human-readable conclusions.
 
-### Quick Triage
+When a rule is deterministic and reusable, prefer moving it into gateway or
+CLI. Short prompt-level fallbacks are allowed only as transitional behavior.
+
+## Non-Goals
+
+- No write operations such as release application, ticket creation, approval,
+  restart, scaling, retry, or mutation workflow by default.
+- No split into multiple analysis skills in this phase.
+- No duplicated resource schema, permission, pagination, SLS, or VictoriaLogs
+  rules in adapter prompts.
+- No requirement that the first response confirms root cause.
+
+## Analysis Model
+
+### Phase 1: First Update
+
+Default to a useful first update, not an exhaustive investigation.
 
 Target:
 
-- finish the first pass within 90 seconds
-- decide whether the user should treat the case as active incident, recovered alert, stale/ignored alert, or needs targeted deepening
-- return one concrete next step, not a full investigation tree
+- usually within 60 seconds
+- answer whether this currently looks healthy, active, recovered,
+  stale/ignored, suspected, or inconclusive
+- include one handling suggestion and only material evidence gaps
 
-Default behavior:
+Preferred first reads:
 
-- if the input is `当前告警`, start with `list alert --status alarm --page-size 10`
-- if the input is `最近告警`, start with `list alert --page-size 10`
-- if multiple alerts are returned, summarize up to 10 and quick-triage only the newest actionable alert with an application name
-- if an alert is old, `ignore=true`, `status=recover`, or `status=recoverbyfix`, do not present it as an active incident
-- for application health, do not fetch appinstance or pod by default unless `status application` is abnormal or the user asks for instance-level analysis
-- defer logs, SLS, topology, trace, release, template, and approval to deep mode
+- application health:
+  `snapshot application --name <app> --env <env> --profile triage --format summary`
+- alert analysis: `snapshot alert <id> --format summary`
+- current-alert triage: `snapshot alert current --format summary`
+- release context: `snapshot release <id> --format summary`
+- task context: `snapshot task <id> --format summary`
+- time-window relationship:
+  `correlate application --name <app> --env <env> --window <duration> --format summary`
 
-Output contract:
+Status-only requests are simpler:
+
+- For `看状态`, `查状态`, or equivalent lookup, run
+  `status application --name <app> --env <env>` first.
+- If no environment is given, use `production-b2b-cn` and say so briefly.
+- Stop when alerts are 0, restart is 0, latency is normal, and the only
+  warning is QPS or traffic.
+
+Do not fetch appinstance, pod, logs, SLS, VictoriaLogs, trace, topology,
+approval, runtime/template, or broad debug output in phase 1 unless the user
+explicitly asks for that evidence.
+
+### Phase 2: Deepen When Needed
+
+Automatically deepen only when one of these is true:
+
+- evidence bundle quality is insufficient
+- an anomaly is clear and the allowed first-pass evidence lacks enough owner,
+  resource, time, or severity context to give a useful handling suggestion
+- evidence classes conflict
+- the user explicitly asks to continue, confirm root cause, inspect logs,
+  inspect trace, inspect instances, or inspect release impact
+
+Deepen with the smallest evidence class that can change the recommendation.
+Do not continue collecting evidence just to make the answer look complete.
+For `当前告警`, do not treat "there is an obvious next read" as a reason to
+deepen before the first answer; put it in `下一步` unless the user asks to
+continue.
+
+### Controlled Action Boundary
+
+Analysis remains read-mostly by default.
+
+- Do not call raw K8S, CMDB restart/scale/stop, rollback, release, approval,
+  or ticket write APIs.
+- The only controlled write surface in this phase is `whale workload restart`.
+- For restart requests, first run
+  `whale workload restart ... --reason <reason>` without `--yes`; this records
+  an audit event and returns CMDB policy.
+- Execute with `--yes` only when policy is `direct_allowed` and the user
+  explicitly confirms the execution.
+- If policy is `approval_required`, recommend a modify-appinstance ticket.
+
+## Output Contract
+
+Default first-pass output:
 
 ```text
-结论等级: active | recovered | stale_or_ignored | healthy | inconclusive
-置信度: high | medium | low
+结论: <healthy | active | recovered | stale_or_ignored | suspected | inconclusive>
+置信度: <high | medium | low>
+处理建议: <one actionable recommendation>
 证据:
-- ...
-不能确认:
-- ...
+- <material evidence>
+未确认:
+- <only material gaps>
 下一步:
-- ...
+- <one best read-only next step>
 ```
 
-### Deepen On Demand
+Status-only output:
 
-Trigger only when:
+```text
+结论: <one sentence>
+证据:
+- <up to 4 short evidence bullets>
+下一步: <optional>
+```
 
-- the user says "继续", "深入", "确认根因", "查日志", "查 SLS", "查 trace", "查拓扑", or equivalent
-- quick triage is inconclusive and one extra evidence class can materially change the recommendation
-- release/config/root-cause confirmation is required
+Rules:
 
-Deep mode can use appinstance, pod, logs, SLS, trace, topology, release, task, and approval reads, but it must still stay read-only.
+- Separate evidence from inference.
+- Do not claim a confirmed root cause from a first-pass bundle unless at least
+  two evidence classes support it.
+- Missing metric series is a visibility or data gap, not proof of normality.
+- Empty active-alert, release, or task lists may be absence evidence when the
+  source status is complete.
+- A QPS or traffic warning alone is not an incident when alerts, restarts,
+  errors, and latency are normal.
 
-## Targeted Metric Selection
+## Intent Router
 
-- ERROR logs, error count, exception logs: `error-logs`
-- latency, timeout, slow call, Dubbo method duration: `latency`
-- traffic, QPS, request volume, no traffic: `traffic`
-- CPU: `cpu`
-- memory, heap: `heap`
-- FullGC, major GC: `major-gc-count`
-- minor GC: `minor-gc-count`
-- fallback when no signal is obvious: `traffic`
+### Application Status Lookup
 
-## Canonical Command Patterns
+Use when the user asks to look up current status without diagnosis language.
 
-### Application
+First read:
 
-- `list application --keyword <text>`
-- `search application --keyword <text>`
-- `show application --name <app-name>`
-- `show application <id>`
-- `status application --name <app-name> --env <env>`
-- `search application --view metric --name <app-name> --env <env> --type <metric>`
-- `show application --view topology --name <app-name>`
+```bash
+whale status application --name <app> --env <env>
+```
 
-### App Instance and Pod
+Stop after this read unless status is materially abnormal or the user asks for
+analysis.
 
-- `list appinstance --of application=<app-name>`
-- `list appinstance --of application=<application-id>`
-- `show appinstance <id>`
-- `status appinstance <id>`
-- `list pod --of appinstance=<id>`
-- `search pod --name <app-name> --namespace <ns> --status <status>`
-- `show appinstance <id> --view runtime`
-- `show appinstance <id> --view template`
+### Application Health Analysis
 
-### Observability
+Use when the user asks whether an application is healthy, abnormal, or worth
+handling.
 
-- `list alert --keyword <text>`
-- `list alert --status alarm --page-size 10`
-- `show alert <id>`
-- `show alert <id> --view timeline`
-- `list event --keyword <text>`
-- `show event <id>`
-- `search log --of application=<app-name> --env <env> --contains <text> --start <ts> --end <ts>`
-- `search log --view sls --id <console-id> --query <expr> --start <ts> --end <ts> --page 1 --limit 100`
-- `search log --view sls --id <console-id> --query '<filter> | select count(1) as cnt' --start <ts> --end <ts>`
-- `search trace --name <app-name> --page 1 --page-size 20`
+First read:
 
-SLS count semantics:
+```bash
+whale snapshot application --name <app> --env <env> --profile triage --format summary
+```
 
-- Use `--limit` only for sample rows, not for totals.
-- If the user asks how many logs match a condition, run a bounded `count(1)` query and report the `cnt` field.
-- If a normal SLS search response includes `total`, treat it as response shape only unless the query itself is a count aggregation.
-- Backend supports auto-segmenting bounded normal-log and single-row `count(1)` queries up to 24h. Skills must not emulate time slicing.
-- After count, fetch rows with `--page N --limit 100`; stop after the counted page range is covered or `has_more=false`.
+Fallback only when snapshot is unavailable, denied, or incomplete:
 
-### Release, Task, Approval
+```bash
+whale status application --name <app> --env <env>
+whale search application --view metric --name <app> --env <env> --type error-logs
+whale search application --view metric --name <app> --env <env> --type latency
+whale search application --view metric --name <app> --env <env> --type traffic
+```
 
-- `list release --keyword <text>`
-- `show release <id>`
-- `list job --of release=<id>`
-- `list deploy-record --keyword <app-name>`
-- `search log --of release=<id> --keyword <text>`
-- `show approval --of release=<id>`
-- `list task --keyword <text>`
-- `show task <id>`
-- `show approval --of task=<id>`
+Deepen candidates:
 
-## Playbooks
-
-### Alert Quick Triage
-
-For a specific alert:
-
-1. `show alert <id>`
-2. `show alert <id> --view timeline`
-3. `status application --name <app-name> --env <env>`
-4. `search application --view metric --name <app-name> --env <env> --type <targeted-metric>`
-
-Handling guidance:
-
-- Active alert + abnormal app status or metric anomaly: recommend immediate owner follow-up and one targeted deep check.
-- Recovered alert + normal app status: recommend review in the alert time window only if recurrence or impact is reported.
-- Old or ignored alert: state that it should not be treated as a current incident without fresh evidence.
-- Missing app name or env: summarize the alert and ask for the missing selector or recommend a bounded `list/search` path.
+- instance distribution:
+  `list appinstance --of application=<app>`, then `status appinstance <id>`
+- pod visibility:
+  `list pod --of appinstance=<id>`, `search pod --name <app> --namespace <ns> --status <status>`, or `show pod <pod-id>`
+- pod runtime evidence:
+  `list event --of pod=<pod-id>`,
+  `search log --of pod=<pod-id> --contains <text> --start <ts> --end <ts>`,
+  `count log --of pod=<pod-id> --contains <text> --start <ts> --end <ts>`
+- cluster pressure:
+  `snapshot cluster --name <cluster> --format summary` or
+  `snapshot cluster --zone <zone> --format summary`
+- node pressure:
+  `list node --cluster-id <cluster-id> --status fail`, then
+  `snapshot node <node-id> --window <duration> --format summary`
+- logs: bounded application logs, SLS, or VictoriaLogs
+- topology or trace: only when dependency or path suspicion is material
+- release or task context: when timing or deployment evidence points there
 
 ### Current Alerts
 
-1. `list alert --status alarm --page-size 10`
-2. Summarize up to 10 alerts by id, app, env, status, age, ignore flag, and message.
-3. Quick-triage only the newest actionable alert with app and env.
-4. If all alerts are stale, ignored, or missing app context, say so and do not deep dive automatically.
+Use when the user says `当前告警`.
 
-### Recent Alerts
+Phase-1 purpose:
 
-1. `list alert --page-size 10`
-2. Summarize up to 10 alerts by id, app, env, status, age, and message.
-3. Quick-triage only the newest alert with app and env.
-4. If the newest alert is recovered, output a recovery/review recommendation, not an active incident recommendation.
+- give a triage direction, not full alert inventory
+- prioritize one current handling lane
+- state first-page scope and material gaps
 
-### Application Health Quick Triage
+Wave 1:
 
-For `meta-api` or any app health request:
+```bash
+whale snapshot alert current --format summary
+```
 
-1. `status application --name <app-name> --env <env>`
-2. `search application --view metric --name <app-name> --env <env> --type error-logs`
-3. `search application --view metric --name <app-name> --env <env> --type latency`
+Use `quality`, `sources`, `signal_keys`, `alert_context`,
+`application_context`, and `next_reads` for the first update. This snapshot
+returns the first active-alert page and one representative actionable alert path
+in a single bundle.
 
-Handling guidance:
+Representative priority remains: active application or workload availability
+alerts first, then resource saturation or capacity alerts, then other
+infrastructure alerts. Break ties by severity and recency.
+Do not treat stale, ignored, recovered, or resource-less alerts as active
+incidents.
+App-less infrastructure alerts such as RDS, VPN, cluster, node, pod,
+deployment, or container alerts may still be active resource incidents; label
+them as resource or workload incidents and state the missing application
+mapping.
+Do not expand later pages before the first answer.
 
-- Normal status + no metric series or no anomaly: report healthy or no obvious app-level issue, confidence medium.
-- Abnormal status or metric anomaly: recommend deepening into appinstance/pod or bounded logs depending on the symptom.
-- Do not claim "fully healthy" without appinstance/pod/log evidence.
+Do not run `correlate`, second alert snapshots, appinstance/pod reads, logs,
+SLS, VictoriaLogs, trace, topology, or release-impact reads before the first
+answer.
 
-### Deepen On Demand Command Set
+### Specific Alert
 
-Use only after quick triage or explicit user request:
+First read:
 
-- instance scope: `list appinstance --of application=<app-name>`, then `status appinstance <id>`, then `list pod --of appinstance=<id>`
-- resource/JVM metrics: `cpu`, `heap`, `minor-gc-count`, `major-gc-count`
-- logs: `search log --of application=<app-name> --env <env> --contains <text> --start <ts> --end <ts>`
-- SLS: count first when the user asks for totals, then page sample logs
-- topology/trace: use only to confirm dependency or traffic-path suspicion
-- release impact: `list release --keyword <app-name> --page-size 5`, `list job --of release=<id>`, `search log --of release=<id> --keyword failed`
+```bash
+whale snapshot alert <id> --format summary
+```
+
+Fallback only when the snapshot is unavailable or lacks app or env:
+
+```bash
+whale show alert <id>
+whale show alert <id> --view timeline
+whale status application --name <app> --env <env>
+whale search application --view metric --name <app> --env <env> --type <targeted-metric>
+```
+
+Metric choice:
+
+- error logs or exception: `error-logs`
+- latency or timeout: `latency`
+- traffic or QPS: `traffic`
+- CPU: `cpu`
+- memory or heap: `heap`
+- FullGC or major GC: `major-gc-count`
+- minor GC: `minor-gc-count`
+- fallback: `traffic`
+
+### Release Impact
+
+First read:
+
+```bash
+whale snapshot release <id> --format summary
+```
+
+Deepen only when needed:
+
+```bash
+whale show release <id>
+whale list job --of release=<id>
+whale search log --of release=<id> --keyword failed
+whale show approval --of release=<id>
+whale list deploy-record --keyword <app>
+```
+
+### Task Context
+
+First read:
+
+```bash
+whale snapshot task <id> --format summary
+```
+
+### Correlation Requests
+
+Use when the user asks whether alerts, releases, tasks, logs, or symptoms are
+related in one time window.
+
+First read:
+
+```bash
+whale correlate application --name <app> --env <env> --window <duration> --format summary
+```
+
+## Log Rules
+
+### SLS
+
+- For totals, prefer `whale count log --view sls --query '<expr>'`.
+- Legacy `search ... '| select count(1) as cnt'` remains compatible.
+- Never infer true totals from `--limit` or normal response `total`.
+- Page normal SLS results with `--page` and `--limit 100`.
+- If the console id or name is unknown, discover it first:
+  `whale list log-console --keyword <text> --page-size 100 --format summary`
+
+### VictoriaLogs
+
+- For totals, use `whale count log --view vlogs --query '<LogsQL>'`.
+- Keep filters inside LogsQL.
+- Prefer explicit `--start` and `--end`; Whale otherwise defaults to latest
+  15m.
+- For syntax uncertainty, consult the official VictoriaLogs docs instead of
+  inventing syntax:
+  - `https://docs.victoriametrics.com/victorialogs/logsql/`
+  - `https://docs.victoriametrics.com/victorialogs/querying/`
 
 ## Constraints
 
-- `search log --of pod=...` is not enabled.
-- `show --name` returning `409` requires one clarification question with candidates.
-- `show approval --of release=<id>` is conditional on release state and must not block the rest of the analysis.
-- `search log --view sls ...` is conditional on log-console visibility and must not block the rest of the analysis.
-- Metric query failure is a visibility or upstream-data gap, not proof that the metric is normal. Record the gap and continue.
-- A confirmed root cause requires at least two evidence classes, for example status/pod plus metric, metric plus log/trace, or release plus metric.
-- Quick triage must not perform write actions, retries, restarts, or approval operations.
+- If `show --name` returns `409`, ask one clarification question with
+  candidates.
+- Metric query failure is a visibility gap, not proof that a metric is normal.
+- Confirmed root cause still requires at least two evidence classes.
