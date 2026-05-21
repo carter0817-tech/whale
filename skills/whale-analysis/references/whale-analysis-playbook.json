@@ -1,45 +1,142 @@
 {
   "skill_name": "whale-analysis",
-  "playbook_version": "2026-05-08",
+  "playbook_version": "2026-05-16",
   "playbook_commit_sha": "workspace",
   "adapter_name": "shared-whale-analysis-playbook",
-  "adapter_version": "5",
-  "execution_mode": "read-only",
-  "default_analysis_mode": "quick-triage",
-  "first_pass_target": "90s",
+  "adapter_version": "17",
+  "execution_mode": "read-mostly-controlled-action",
+  "default_analysis_mode": "first-update-then-deepen",
+  "first_pass_target": "60s",
+  "application_status_fast_path_target": "10s",
   "supported_cli_range": ">=0.1.0",
   "supported_contract_range": "2026-04",
   "transcript_schema_version": "1",
-  "canonical_derivation": "ops-api-gateway/internal/resourcekernel -> /cli/v1/debug/schema|/cli/v1/debug/explain -> whale -> whale-analysis",
-  "compatibility_deprecation_host": "gateway-derived registry",
-  "sls_count_policy": "SLS count intent must use a bounded query with '| select count(1) as cnt'; never infer real counts from --limit or normal search response total",
-  "sls_pagination_policy": "SLS normal-log retrieval uses --page with --limit<=100; count first, then iterate pages. Backend can auto-segment bounded normal-log and single-row count(1) queries up to 24h, so clients must not emulate time slicing.",
-  "quick_triage_policy": {
-    "normal_command_budget": 4,
-    "hard_command_budget": 5,
-    "must_include": [
-      "conclusion_grade",
-      "confidence",
-      "evidence",
-      "not_confirmed",
-      "next_best_action"
+  "canonical_derivation": "ops-api-gateway/internal/resourcekernel -> /cli/v1/debug/schema|/cli/v1/debug/explain|/cli/v1/snapshot|/cli/v1/correlate -> whale -> whale-analysis",
+  "ownership_boundary": {
+    "gateway_resource_kernel": [
+      "resource semantics",
+      "api composition",
+      "evidence bundles",
+      "permission behavior",
+      "pagination",
+      "query semantics",
+      "compatibility"
     ],
+    "cli": [
+      "command grammar",
+      "auth and config",
+      "help and version",
+      "install surfaces",
+      "local rendering"
+    ],
+    "skill": [
+      "natural-language routing",
+      "first-pass evidence choice",
+      "stop/deepen decisions",
+      "human-readable conclusions"
+    ]
+  },
+  "evidence_bundle_policy": "Prefer gateway-owned snapshot/correlate bundles for application, alert, release, task, and correlation analysis. Skills use --format summary for first updates and use atomic commands only as fallback or requested deepening reads.",
+  "current_alert_first_pass_policy": {
+    "purpose": "triage_direction_not_full_inventory_or_root_cause_proof",
+    "allowed_commands": [
+      "whale snapshot alert current --format summary"
+    ],
+    "representative_priority": [
+      "active_application_or_workload_availability_alerts",
+      "resource_saturation_or_capacity_alerts",
+      "other_infrastructure_alerts",
+      "tie_break_by_severity_then_recency"
+    ],
+    "forbidden_before_first_answer": [
+      "pagination_expansion",
+      "multiple_alert_snapshots",
+      "correlate",
+      "logs",
+      "sls",
+      "vlogs",
+      "trace",
+      "topology",
+      "appinstance_or_pod_reads",
+      "release_impact_reads"
+    ],
+    "acceptable_incompleteness": "First answer may be based on the current-alert snapshot first page plus one representative alert path when it states the scope, prioritization reason, gaps, and next best read-only step.",
+    "resource_incident_rule": "App-less infrastructure alerts such as RDS, VPN, cluster, node, pod, deployment, or container alerts may be active resource incidents, but must not be turned into application root-cause claims without application mapping evidence."
+  },
+  "deepen_triggers": [
+    "bundle_quality_insufficient",
+    "clear_anomaly_and_first_pass_lacks_owner_resource_time_severity_context",
+    "conflicting_evidence_classes",
+    "user_explicitly_requests_depth"
+  ],
+  "non_goals": [
+    "raw_write_actions",
+    "approval_bypass_or_uncontrolled_restart_workflows",
+    "multiple_analysis_skills_this_phase",
+    "duplicated_resource_schema_in_prompt",
+    "mandatory_first_pass_root_cause_confirmation"
+  ],
+  "controlled_action_policy": {
+    "default": "read_only",
+    "allowed_write_surface": "whale workload restart",
+    "plan_command": "whale workload restart ... --reason <reason>",
+    "execute_command": "whale workload restart ... --reason <reason> --yes",
+    "execution_gate": "policy must be direct_allowed and human must explicitly confirm execution",
+    "approval_required_behavior": "recommend modify-appinstance ticket; do not bypass approval",
+    "forbidden": [
+      "raw_k8s_write",
+      "raw_cmdb_restart_scale_stop",
+      "rollback",
+      "release_application",
+      "ticket_creation_without_explicit_action_design"
+    ]
+  },
+  "compatibility_deprecation_host": "gateway-derived registry",
+  "sls_count_policy": "SLS count intent should prefer `count log --view sls --query <expr>`; the legacy `search ... '| select count(1) as cnt'` form remains compatible. Never infer real counts from --limit or normal search response total.",
+  "sls_pagination_policy": "SLS normal-log retrieval uses --page with --limit<=100; count first, then iterate pages. Backend can auto-segment bounded normal-log and single-row count(1) queries up to 24h, so clients must not emulate time slicing.",
+  "vlogs_count_policy": "VictoriaLogs count intent must use `count log --view vlogs --query <LogsQL>`; keep field filters in LogsQL and never infer real counts from search limit or response total.",
+  "output_contract": {
+    "default": [
+      "conclusion",
+      "confidence",
+      "handling_recommendation",
+      "evidence",
+      "material_gaps",
+      "next_best_read_only_step"
+    ],
+    "status_only": [
+      "one_sentence_conclusion",
+      "up_to_4_evidence_bullets",
+      "optional_next_step"
+    ]
+  },
+  "quick_triage_policy": {
+    "normal_wave_budget": 2,
+    "hard_wave_budget": 3,
+    "max_parallel_commands_per_wave": 4,
+    "parallel_wave_policy": "Optimize first-pass latency with evidence bundles or independent parallel reads. Do not reduce evidence density just to reduce command count.",
+    "application_status_lookup_fast_path": "For status lookup requests such as 看状态 or 查状态, default missing env to production-b2b-cn, run only status application first, and escalate only when status is materially abnormal or the user asks for analysis/health/diagnosis/metrics/stronger evidence.",
+    "application_health_snapshot": "For natural analysis requests such as 分析应用状态, 分析健康度, or 看看有没有问题, run snapshot application --profile triage --format summary first. Fall back to status/error-logs/latency/traffic only when the snapshot surface is unavailable or incomplete.",
+    "current_alert_first_pass": "For 当前告警, phase 1 uses snapshot alert current --format summary. Do not expand pages or correlate before the first answer.",
     "forbidden_by_default": [
       "application_log",
       "sls",
+      "vlogs",
       "trace",
       "topology",
       "appinstance_template",
       "appinstance_runtime",
-      "release_approval"
+      "release_approval",
+      "write_actions"
     ]
   },
   "metric_evidence_policy": {
     "application_health_quick": [
       "error-logs",
-      "latency"
+      "latency",
+      "traffic"
     ],
-    "alert_quick": "exactly one targeted metric selected from alert content",
+    "alert_quick": "one targeted metric selected from alert content when the alert snapshot is unavailable or incomplete",
     "targeted_when_resource_or_jvm_symptom": [
       "cpu",
       "heap",
@@ -47,5 +144,15 @@
       "major-gc-count"
     ],
     "confirmation_rule": "confirmed root cause requires at least two evidence classes; otherwise report suspected"
+  },
+  "pressure_evidence_policy": {
+    "current_cli_state": "canonical node/cluster resources expose list/show/snapshot; use them for second-stage resource evidence, not before the first current-alert answer",
+    "canonical_commands": [
+      "whale list node --cluster-id <cluster-id> --status fail",
+      "whale snapshot node <node-id> --window <duration> --format summary",
+      "whale snapshot cluster --name <cluster> --format summary",
+      "whale snapshot cluster --zone <zone> --format summary"
+    ],
+    "recommended_gateway_shape": "Pressure evidence is exposed as read-only canonical resources and evidence bundle signals owned by ops-api-gateway/resourcekernel, backed by ops-ob k8s-node metrics and cluster overview APIs."
   }
 }
